@@ -3,6 +3,7 @@ path — same loop, same prompt, same tools. No commands are ever registered."""
 
 import asyncio
 import logging
+import secrets
 import time
 
 from telegram import Update
@@ -12,6 +13,7 @@ from atlas.agent import actions, background, context as context_builder, loop
 from atlas.bot import onboarding
 from atlas.bot.inbound import Inbound, normalize
 from atlas.bot.outbound import StreamingReply
+from atlas.config import settings
 from atlas.db import messages as messages_repo
 from atlas.db import traces as traces_repo
 from atlas.db import integrations as integrations_repo
@@ -20,6 +22,9 @@ from atlas.db import users as users_repo
 log = logging.getLogger(__name__)
 
 SORRY = "Something broke on my side just then. Say that again?"
+ACCESS_GRANTED = "Access granted! Welcome to the Atlas evaluation preview."
+ACCESS_RESTRICTED = "Access restricted. Please send the evaluation passcode to use Atlas."
+EVALUATORS_ONLY = "Sorry, this preview build of Atlas is restricted to authorized evaluators."
 
 
 async def on_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
@@ -39,6 +44,9 @@ async def on_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
 
 async def _handle(inbound: Inbound, reply: StreamingReply) -> None:
     user = await users_repo.get_or_create(inbound.chat_id, inbound.telegram_user_id, inbound.first_name)
+    if not await _access_allowed(inbound, user, reply):
+        return
+
     first_turn = not await messages_repo.has_history(user.id)
     prior_history = await context_builder.history(user)
 
@@ -132,6 +140,29 @@ async def _handle(inbound: Inbound, reply: StreamingReply) -> None:
 
     # facts and the narrative are refreshed after the reply is out, never before it
     asyncio.create_task(background.after_turn(user, text, final))
+
+
+async def _access_allowed(inbound: Inbound, user, reply: StreamingReply) -> bool:
+    """Resolve the preview gate before history, integrations, onboarding, or LLM work."""
+    if not settings.access_control_enabled:
+        return True
+    if (
+        inbound.telegram_user_id in settings.allowed_telegram_user_ids
+        or inbound.chat_id in settings.allowed_chat_id_values
+        or inbound.telegram_user_id in user.authorized_telegram_user_ids
+    ):
+        return True
+
+    supplied = inbound.text.strip()
+    if settings.tester_passcode and supplied and secrets.compare_digest(
+        supplied, settings.tester_passcode
+    ):
+        await users_repo.authorize_user(user.id, inbound.telegram_user_id)
+        await reply.finish(ACCESS_GRANTED)
+        return False
+
+    await reply.finish(ACCESS_RESTRICTED if settings.tester_passcode else EVALUATORS_ONLY)
+    return False
 
 
 def _action_reply(result: dict) -> str:

@@ -13,6 +13,12 @@ services:
         value: 3.12.12
       - key: TELEGRAM_BOT_TOKEN
         sync: false
+      - key: ALLOWED_TELEGRAM_USERS
+        sync: false
+      - key: ALLOWED_CHAT_IDS
+        sync: false
+      - key: TESTER_PASSCODE
+        sync: false
       - key: GEMINI_API_KEY
         sync: false
       - key: FALLBACK_LLM_API_KEY

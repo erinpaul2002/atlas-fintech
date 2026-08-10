@@ -1,5 +1,6 @@
 """Env → typed settings. A missing secret crashes here, at import, naming the variable."""
 
+from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -21,6 +22,11 @@ class Settings(BaseSettings):
     public_base_url: str = ""
     render_external_hostname: str = ""
 
+    # Optional preview access control. If all three are empty, the bot remains open.
+    allowed_telegram_users: str = ""
+    allowed_chat_ids: str = ""
+    tester_passcode: str = ""
+
     # tunables
     # Free tier is per-model: gemini-2.5-flash gives 20 requests/day (≈10 turns), flash-lite
     # gives 500. Quota, not quality, picks this until billing is on — then GEMINI_MODEL=
@@ -32,6 +38,31 @@ class Settings(BaseSettings):
     mongodb_db: str = "atlas"
     port: int = 8080
     log_level: str = "INFO"
+
+    @field_validator("allowed_telegram_users", "allowed_chat_ids")
+    @classmethod
+    def validate_telegram_ids(cls, value: str) -> str:
+        for item in value.split(","):
+            item = item.strip()
+            if item:
+                int(item)
+        return value
+
+    @property
+    def allowed_telegram_user_ids(self) -> set[int]:
+        return {int(item.strip()) for item in self.allowed_telegram_users.split(",") if item.strip()}
+
+    @property
+    def allowed_chat_id_values(self) -> set[int]:
+        return {int(item.strip()) for item in self.allowed_chat_ids.split(",") if item.strip()}
+
+    @property
+    def access_control_enabled(self) -> bool:
+        return bool(
+            self.allowed_telegram_user_ids
+            or self.allowed_chat_id_values
+            or self.tester_passcode
+        )
 
     @property
     def oauth_redirect_uri(self) -> str:

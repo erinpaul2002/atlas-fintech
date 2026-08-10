@@ -38,6 +38,10 @@ class Interests(BaseModel):
 class User(Doc):
     telegram_chat_id: int = 0
     telegram_user_id: int = 0
+    is_authorized: bool = False
+    # A chat may contain multiple Telegram users. Keep passcode grants per sender so one
+    # evaluator entering the passcode does not unlock a public group for everyone.
+    authorized_telegram_user_ids: list[int] = []
     first_name: str = ""
     role: str = ""
     timezone: str = "UTC"

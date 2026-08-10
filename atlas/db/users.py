@@ -30,6 +30,19 @@ async def by_id(user_id: Any) -> User | None:
     return User(**doc) if doc else None
 
 
+async def authorize_user(user_id: Any, telegram_user_id: int) -> User | None:
+    """Persist a passcode grant for one Telegram sender within this chat."""
+    doc = await db().users.find_one_and_update(
+        {"_id": user_id},
+        {
+            "$addToSet": {"authorized_telegram_user_ids": telegram_user_id},
+            "$set": {"is_authorized": True, "updated_at": utcnow()},
+        },
+        return_document=ReturnDocument.AFTER,
+    )
+    return User(**doc) if doc else None
+
+
 ALLOWED_PATCH = {
     "first_name", "role", "timezone", "brief_hour_local", "brief_minute_local",
     "interests", "intel_preferences", "preferences", "onboarding_offered", "google_offer_shown",
