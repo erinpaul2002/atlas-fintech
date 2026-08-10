@@ -35,6 +35,13 @@ async def system_instruction(
     lines.append(f"role: {user.role or 'unknown'}")
     lines.append(f"onboarding: {user.onboarding_status}")
     lines.append(f"their local time right now: {when:%A %d %b %Y, %H:%M} ({user.timezone})")
+    lines.append(
+        "when asked for the current time: repeat the local time above exactly; never calculate a different time"
+    )
+    lines.append(
+        "privacy default: minimize personal data from connected sources; do not volunteer phone numbers, "
+        "email addresses, banking/identity filenames, or similar sensitive details unless they explicitly ask"
+    )
     if first_turn:
         lines.append(
             "this is their first message: answer a real question first; otherwise briefly describe "

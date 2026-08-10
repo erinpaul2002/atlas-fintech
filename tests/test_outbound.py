@@ -29,6 +29,14 @@ def test_bold_and_link_render_together():
     )
 
 
+def test_repeated_markdown_link_target_is_rendered_once():
+    url = "https://docs.google.com/spreadsheets/d/abc/edit"
+
+    assert _html(f"Open [AI Watchlist]({url}) ({url}).") == (
+        f'Open <a href="{url}">AI Watchlist</a>.'
+    )
+
+
 def test_non_web_markdown_link_stays_inert():
     assert _html("Open [this](tg://user?id=1)") == "Open [this](tg://user?id=1)"
 

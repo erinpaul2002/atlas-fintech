@@ -132,9 +132,9 @@ async def test_google_setup_uses_one_clickable_link_for_all_services(monkeypatch
         user, inbound, first_turn=False, google_connected=False
     )
 
-    assert "[Tap here to connect Google](https://atlas.example/oauth/google/start?state=one_time)" in reply
-    assert "open this address" in reply
-    assert reply.count("https://atlas.example/oauth/google/start?state=one_time") == 2
+    assert "[Connect Google securely](https://atlas.example/oauth/google/start?state=one_time)" in reply
+    assert "confirm here automatically" in reply
+    assert reply.count("https://atlas.example/oauth/google/start?state=one_time") == 1
     assert transitions == [("in_progress", "google_pending")]
 
 
@@ -192,6 +192,47 @@ async def test_idk_skips_the_current_profile_question_without_storing_it(monkeyp
 def test_brief_time_requires_a_timezone_and_parses_ist():
     assert onboarding._brief_time("8:30 am", "UTC") is None
     assert onboarding._brief_time("8:30 am IST", "UTC") == (8, 30, "Asia/Kolkata")
+    assert onboarding._brief_time("every morning 9am Indian time", "UTC") == (
+        9,
+        0,
+        "Asia/Kolkata",
+    )
+
+
+@pytest.mark.asyncio
+async def test_drive_can_list_folders_without_a_search_term(monkeypatch):
+    from atlas.services import google as google_service
+
+    captured = {}
+
+    async def get_json(url, token, what, params=None):
+        captured.update(params or {})
+        return {"files": []}
+
+    monkeypatch.setattr(google_service, "_get_json", get_json)
+
+    result = await google_service.drive_search("token", "", 25, "folder")
+
+    assert result == []
+    assert "application/vnd.google-apps.folder" in captured["q"]
+    assert "fullText contains" not in captured["q"]
+    assert captured["orderBy"] == "modifiedTime desc"
+
+
+@pytest.mark.asyncio
+async def test_context_instructs_time_accuracy_and_privacy(monkeypatch):
+    from atlas.agent import context as context_builder
+
+    async def no_facts(*args, **kwargs):
+        return []
+
+    monkeypatch.setattr(context_builder.facts_repo, "current", no_facts)
+    system = await context_builder.system_instruction(
+        User(timezone="Asia/Kolkata"), connected=True
+    )
+
+    assert "repeat the local time above exactly" in system
+    assert "minimize personal data" in system
 
 
 def test_media_is_attached_to_the_native_model_request():

@@ -74,6 +74,8 @@ IANA_ZONE = re.compile(r"\b([A-Za-z]+/[A-Za-z_+-]+)\b")
 ZONE_ALIASES = {
     "ist": "Asia/Kolkata",
     "india": "Asia/Kolkata",
+    "india time": "Asia/Kolkata",
+    "indian time": "Asia/Kolkata",
     "kolkata": "Asia/Kolkata",
     "et": "America/New_York",
     "est": "America/New_York",
@@ -201,7 +203,8 @@ async def handle(
         await users_repo.mark_onboarding_offered(
             user.id, ["when the morning brief should land"]
         )
-        return await _advance(updated, step)
+        next_question = await _advance(updated, step)
+        return f"Daily brief set for {_display_time(hour, minute, timezone)}.\n\n{next_question}"
 
     if step == "google":
         if google_connected:
@@ -247,10 +250,9 @@ async def _advance(user: User, current: str) -> str:
 async def _google_link(user: User) -> str:
     url = await connection_link(ToolContext(user=user))
     return (
-        f"🔗 [Tap here to connect Google]({url})\n"
-        "If the link above is not tappable, open this address in your browser:\n"
-        f"{url}\n"
-        "The link is one-time. After consent, return here and say “connected” — or say “skip Google.”"
+        f"🔗 [Connect Google securely]({url})\n"
+        "This one-time link connects Sheets, Gmail, Calendar, and Drive. "
+        "I'll confirm here automatically when it's done."
     )
 
 
@@ -304,6 +306,13 @@ def _timezone(text: str) -> str | None:
     except (ZoneInfoNotFoundError, ValueError):
         return None
     return candidate
+
+
+def _display_time(hour: int, minute: int, timezone: str) -> str:
+    meridiem = "AM" if hour < 12 else "PM"
+    display_hour = hour % 12 or 12
+    label = "IST" if timezone == "Asia/Kolkata" else timezone
+    return f"{display_hour}:{minute:02d} {meridiem} {label}"
 
 
 def _has_label(text: str, label: str) -> bool:

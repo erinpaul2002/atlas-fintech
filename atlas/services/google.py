@@ -16,6 +16,11 @@ AUTH_URL = "https://accounts.google.com/o/oauth2/v2/auth"
 TOKEN_URL = "https://oauth2.googleapis.com/token"
 SHEETS_API = "https://sheets.googleapis.com/v4/spreadsheets"
 SHEET_ID = re.compile(r"/spreadsheets/d/([A-Za-z0-9_-]+)")
+DRIVE_MIME_TYPES = {
+    "folder": "application/vnd.google-apps.folder",
+    "spreadsheet": "application/vnd.google-apps.spreadsheet",
+    "document": "application/vnd.google-apps.document",
+}
 
 
 def authorization_url(state: str) -> str:
@@ -191,12 +196,27 @@ async def calendar_events(token: str, start: str, end: str) -> Any:
             for e in data.get("items", [])]
 
 
-async def drive_search(token: str, query: str, maximum: int = 10) -> Any:
-    escaped = query.replace("'", "\\'")
+async def drive_search(
+    token: str,
+    query: str = "",
+    maximum: int = 10,
+    kind: str = "any",
+) -> Any:
+    escaped = query.strip().replace("'", "\\'")
+    clauses = ["trashed = false"]
+    if escaped:
+        clauses.append(f"(name contains '{escaped}' or fullText contains '{escaped}')")
+    mime_type = DRIVE_MIME_TYPES.get(kind)
+    if mime_type:
+        clauses.append(f"mimeType = '{mime_type}'")
     data = await _get_json(
         "https://www.googleapis.com/drive/v3/files", token, "Google Drive search",
-        params={"q": f"trashed = false and fullText contains '{escaped}'", "pageSize": max(1, min(maximum, 20)),
-                "fields": "files(id,name,mimeType,modifiedTime,webViewLink,description)"},
+        params={
+            "q": " and ".join(clauses),
+            "pageSize": max(1, min(maximum, 50)),
+            "orderBy": "modifiedTime desc",
+            "fields": "files(id,name,mimeType,modifiedTime,webViewLink,description,parents)",
+        },
     )
     return data.get("files", []) if "error" not in data else data
 

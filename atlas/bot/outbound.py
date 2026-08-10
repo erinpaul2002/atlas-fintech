@@ -121,6 +121,9 @@ async def _deliver(action: Callable[[str, str | None], Awaitable[Any]], text: st
 SENTENCE_END = re.compile(r"[.!?:]\s*$|\n\s*$")
 BOLD = re.compile(r"\*\*(.+?)\*\*|__(.+?)__", re.S)
 INLINE_LINK = re.compile(r"\[([^\]\n]+)\]\((https?://[^\s)]+)\)")
+REPEATED_LINK_TARGET = re.compile(
+    r"\[(?P<label>[^\]\n]+)\]\((?P<url>https?://[^\s)]+)\)\s*\((?P=url)\)"
+)
 INLINE_MARKUP = re.compile(
     r"\*\*(?P<star_bold>.+?)\*\*|__(?P<under_bold>.+?)__|"
     r"\[(?P<link_text>[^\]\n]+)\]\((?P<link_url>https?://[^\s)]+)\)",
@@ -134,6 +137,7 @@ def _at_boundary(text: str) -> bool:
 
 def _html(text: str) -> str:
     """Model Markdown → Telegram HTML: bold and safe web links survive."""
+    text = REPEATED_LINK_TARGET.sub(r"[\g<label>](\g<url>)", text)
     out: list[str] = []
     pos = 0
     for match in INLINE_MARKUP.finditer(text):

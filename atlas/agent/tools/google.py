@@ -161,16 +161,28 @@ async def get_calendar(ctx: ToolContext, args: dict[str, Any]) -> dict[str, Any]
 
 @tool(
     "search_drive",
-    "Search the connected Google Drive for finance documents by topic, company or filename.",
+    "Find or list files and folders in the connected Google Drive. For requests like 'any folders' or 'what sheets can you see', use an empty query and the matching kind.",
     {
         "type": "object",
-        "properties": {"query": {"type": "string"}, "max": {"type": "integer"}},
-        "required": ["query"],
+        "properties": {
+            "query": {"type": "string", "description": "Optional name or content search; leave empty to list"},
+            "kind": {
+                "type": "string",
+                "enum": ["any", "folder", "spreadsheet", "document"],
+                "description": "Limit results to a Drive item type",
+            },
+            "max": {"type": "integer"},
+        },
     },
 )
 async def search_drive(ctx: ToolContext, args: dict[str, Any]) -> dict[str, Any]:
     token = await integrations.google_access_token(ctx.user.id, integrations.DRIVE_SCOPE)
     if not token:
         return await _not_connected(ctx)
-    result = await google.drive_search(token, str(args.get("query") or ""), int(args.get("max") or 10))
+    result = await google.drive_search(
+        token,
+        str(args.get("query") or ""),
+        int(args.get("max") or 10),
+        str(args.get("kind") or "any"),
+    )
     return result if isinstance(result, dict) and "error" in result else ok(result, source="Google Drive")
