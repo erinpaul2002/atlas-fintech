@@ -1,8 +1,9 @@
 """Google OAuth redirect and callback endpoints."""
 
 from fastapi import APIRouter, Query
-from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi.responses import RedirectResponse
 
+from atlas.api.oauth_ui import cancelled_page, connected_page, expired_page, failed_page
 from atlas.db import integrations
 from atlas.services import google
 
@@ -12,8 +13,13 @@ router = APIRouter(prefix="/oauth/google", tags=["google"])
 @router.get("/start")
 async def start(state: str = Query(min_length=20)):
     if not await integrations.state_exists(state):
-        return HTMLResponse("This connection link expired. Ask Atlas for a new one.", status_code=400)
+        return expired_page()
     return RedirectResponse(google.authorization_url(state))
+
+
+@router.get("/complete")
+async def complete():
+    return connected_page()
 
 
 @router.get("/callback")
@@ -24,14 +30,16 @@ async def callback(
 ):
     user_id = await integrations.consume_oauth_state(state)
     if user_id is None:
-        return HTMLResponse("This connection link is invalid or expired.", status_code=400)
+        return expired_page()
     if error or not code:
-        return HTMLResponse("Google connection was cancelled. You can close this tab.", status_code=400)
+        return cancelled_page()
 
     token = await google.exchange_code(code)
     if "error" in token:
-        return HTMLResponse("Google could not be connected. Ask Atlas for a fresh link.", status_code=502)
+        return failed_page()
     await integrations.save_google(user_id, token)
-    return HTMLResponse(
-        "<h2>Google connected</h2><p>You can close this tab and return to Atlas in Telegram.</p>"
+    return RedirectResponse(
+        url="/oauth/google/complete",
+        status_code=303,
+        headers={"Cache-Control": "no-store", "Referrer-Policy": "no-referrer"},
     )
