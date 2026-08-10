@@ -52,6 +52,8 @@ INDEXES = [
     ("seen_items", [("user_id", 1), ("item_key", 1)], {"unique": True}),
     ("seen_items", [("first_seen_at", 1)], {"expireAfterSeconds": 2592000}),
     ("deliveries", [("user_id", 1), ("kind", 1), ("sent_at", -1)], {}),
+    ("visuals", [("user_id", 1), ("created_at", -1)], {}),
+    ("visuals", [("created_at", 1)], {"expireAfterSeconds": 2592000}),
 ]
 
 VECTOR_INDEXES = [

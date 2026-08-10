@@ -10,6 +10,7 @@ from telegram.ext import Application
 
 from atlas.api.health import router as health_router
 from atlas.api.oauth import router as oauth_router
+from atlas.api.visuals import router as visuals_router
 from atlas.bot import handlers
 from atlas.config import settings
 from atlas.db.client import close as close_db
@@ -67,6 +68,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="Atlas", lifespan=lifespan)
 app.include_router(health_router)
 app.include_router(oauth_router)
+app.include_router(visuals_router)
 
 
 def main() -> None:
