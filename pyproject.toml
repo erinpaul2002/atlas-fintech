@@ -16,6 +16,7 @@ dependencies = [
     "pydantic>=2.9",
     "pydantic-settings>=2.6",
     "cryptography>=43",
+    "pypdf>=5.0",
 ]
 
 [dependency-groups]

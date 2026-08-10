@@ -1,4 +1,4 @@
-"""Two-step Google Sheets writes. The model can propose; only this module executes."""
+"""Durable two-step Google writes. The model can propose; only this module executes."""
 
 import hashlib
 import json
@@ -24,10 +24,14 @@ CELL = re.compile(r"^([A-Za-z]+)(\d+)(?::[A-Za-z]+\d+)?$")
 BATCH_ROWS = 50
 
 
-async def propose(user_id: Any, spec: dict[str, Any]) -> PendingAction:
+async def propose(
+    user_id: Any, spec: dict[str, Any], kind: str = "sheet_write"
+) -> PendingAction:
+    if kind not in {"sheet_write", "calendar_event"}:
+        raise ValueError(f"unsupported action kind: {kind}")
     canonical = json.dumps(spec, sort_keys=True, separators=(",", ":"), default=str)
-    key = "sha256:" + hashlib.sha256(f"{user_id}:{canonical}".encode()).hexdigest()
-    summary = proposal_summary(spec)
+    key = "sha256:" + hashlib.sha256(f"{user_id}:{kind}:{canonical}".encode()).hexdigest()
+    summary = proposal_summary(spec, kind)
 
     await db().pending_actions.update_many(
         {"user_id": user_id, "status": "pending", "idempotency_key": {"$ne": key}},
@@ -35,7 +39,7 @@ async def propose(user_id: Any, spec: dict[str, Any]) -> PendingAction:
     )
     doc = {
         "user_id": user_id,
-        "kind": "sheet_write",
+        "kind": kind,
         "idempotency_key": key,
         "spec": spec,
         "summary": summary,
@@ -61,7 +65,22 @@ async def propose(user_id: Any, spec: dict[str, Any]) -> PendingAction:
         return PendingAction(**existing)
 
 
-def proposal_summary(spec: dict[str, Any]) -> str:
+def proposal_summary(spec: dict[str, Any], kind: str = "sheet_write") -> str:
+    if kind == "calendar_event":
+        attendees = [str(value) for value in spec.get("attendees") or []]
+        reminders = [int(value) for value in spec.get("reminder_minutes") or []]
+        extras = []
+        if attendees:
+            extras.append("invite " + ", ".join(attendees))
+        if reminders:
+            extras.append(
+                "remind " + ", ".join(f"{minutes} minutes before" for minutes in reminders)
+            )
+        suffix = f"; {'; '.join(extras)}" if extras else ""
+        return (
+            f"Schedule '{spec.get('summary', 'Untitled event')}' from {spec.get('start')} "
+            f"to {spec.get('end')}{suffix}. Nothing will be created until you confirm."
+        )
     count = len(spec.get("values") or [])
     target = str(spec.get("target") or "Sheet1")
     mode = spec.get("mode")
@@ -102,7 +121,7 @@ async def classify_reply(user_text: str, summary: str) -> str:
         return "other"
     raw = await provider.generate(
         system=(
-            "Classify a reply to a proposed spreadsheet write. Confirm only when the user "
+            "Classify a reply to a proposed external action. Confirm only when the user "
             "unmistakably agrees to the exact proposal. If they change any detail, choose amend. "
             "Questions, new topics, hesitation, and ambiguous replies are other. Return JSON."
         ),
@@ -125,25 +144,56 @@ async def confirm_and_execute(user: User, action: PendingAction) -> dict[str, An
         return_document=ReturnDocument.AFTER,
     )
     if not claimed:
-        return {"ok": False, "error": "That write is no longer pending.", "rows_written": 0}
+        return {
+            "ok": False,
+            "kind": action.kind,
+            "error": "That action is no longer pending.",
+            "rows_written": 0,
+        }
     current = PendingAction(**claimed)
-    token = await integrations.google_access_token(user.id, integrations.SPREADSHEETS_SCOPE)
+    required_scope = (
+        integrations.CALENDAR_SCOPE
+        if current.kind == "calendar_event"
+        else integrations.SPREADSHEETS_SCOPE
+    )
+    token = await integrations.google_access_token(user.id, required_scope)
     if not token:
-        return await _retryable(current, "Google is not connected or the Sheets permission expired.")
+        capability = "Calendar" if current.kind == "calendar_event" else "Sheets"
+        return await _retryable(
+            current, f"Google is not connected or the {capability} permission expired."
+        )
 
     try:
-        result = await _execute_rows(current, token)
+        result = (
+            await _execute_calendar_event(current, token)
+            if current.kind == "calendar_event"
+            else await _execute_rows(current, token)
+        )
     except Exception as exc:
-        return await _retryable(current, f"The write was interrupted ({type(exc).__name__}).")
+        return await _retryable(current, f"The action was interrupted ({type(exc).__name__}).")
     if "error" in result:
         return await _retryable(current, str(result["error"]), int(result.get("rows_written") or 0))
 
-    written = int(result["rows_written"])
+    written = int(result.get("rows_written") or 0)
     await db().pending_actions.update_one(
         {"_id": current.id, "status": "executing"},
         {"$set": {"status": "done", "rows_written": written, "completed_at": utcnow(), "error": None}},
     )
-    return {"ok": True, "rows_written": written, "target": current.spec.get("target", "Sheet1")}
+    if current.kind == "calendar_event":
+        return {
+            "ok": True,
+            "kind": current.kind,
+            "rows_written": 0,
+            "summary": result.get("summary", current.spec.get("summary", "Calendar event")),
+            "start": result.get("start", current.spec.get("start", "")),
+            "html_link": result.get("html_link", ""),
+        }
+    return {
+        "ok": True,
+        "kind": current.kind,
+        "rows_written": written,
+        "target": current.spec.get("target", "Sheet1"),
+    }
 
 
 async def _retryable(action: PendingAction, error: str, rows_written: int | None = None) -> dict[str, Any]:
@@ -153,7 +203,13 @@ async def _retryable(action: PendingAction, error: str, rows_written: int | None
         {"$set": {"status": "pending", "proposed_at": utcnow(), "rows_written": written, "error": error},
          "$unset": {"confirmed_at": ""}},
     )
-    return {"ok": False, "error": error, "rows_written": written, "retryable": True}
+    return {
+        "ok": False,
+        "kind": action.kind,
+        "error": error,
+        "rows_written": written,
+        "retryable": True,
+    }
 
 
 async def _execute_rows(action: PendingAction, token: str) -> dict[str, Any]:
@@ -204,6 +260,23 @@ async def _execute_rows(action: PendingAction, token: str) -> dict[str, Any]:
         written += len(batch)
         await db().pending_actions.update_one({"_id": action.id}, {"$set": {"rows_written": written}})
     return {"rows_written": written}
+
+
+async def _execute_calendar_event(action: PendingAction, token: str) -> dict[str, Any]:
+    spec = dict(action.spec)
+    event_id = action.idempotency_key.removeprefix("sha256:")[:48]
+    return await google.create_calendar_event(
+        token,
+        summary=str(spec["summary"]),
+        start=str(spec["start"]),
+        end=str(spec["end"]),
+        description=str(spec.get("description") or ""),
+        attendees=[str(value) for value in spec.get("attendees") or []],
+        location=str(spec.get("location") or ""),
+        timezone=str(spec.get("timezone") or ""),
+        reminder_minutes=[int(value) for value in spec.get("reminder_minutes") or []],
+        event_id=event_id,
+    )
 
 
 def target_start(target: str) -> tuple[str, int | None]:

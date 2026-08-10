@@ -1,25 +1,13 @@
 """Composite Google tools. Tokens stay below this boundary and never reach the model."""
 
 from typing import Any
-from urllib.parse import urlencode
 
 from atlas.agent import actions
+from atlas.agent.tools.google_auth import connection_link, not_connected
 from atlas.agent.tools.registry import ToolContext, ok, tool
-from atlas.config import settings
 from atlas.db import integrations
-from atlas.db import users as users_repo
 from atlas.services import google
 from atlas.services.util import now_iso
-
-
-async def connection_link(ctx: ToolContext) -> str:
-    state = await integrations.create_oauth_state(ctx.user.id)
-    await users_repo.patch(ctx.user.id, {"google_offer_shown": True})
-    return f"{settings.effective_public_base_url}/oauth/google/start?{urlencode({'state': state})}"
-
-
-async def _not_connected(ctx: ToolContext) -> dict[str, Any]:
-    return {"error": "not_connected", "link": await connection_link(ctx)}
 
 
 @tool(
@@ -56,7 +44,7 @@ async def read_sheet(ctx: ToolContext, args: dict[str, Any]) -> dict[str, Any]:
 
     token = await integrations.google_access_token(ctx.user.id, integrations.SPREADSHEETS_SCOPE)
     if not token:
-        return await _not_connected(ctx)
+        return await not_connected(ctx)
     rows = await google.sheet_values(token, spreadsheet_id, range_ or "A:Z")
     if not isinstance(rows, list):
         return rows
@@ -81,7 +69,7 @@ async def read_sheet(ctx: ToolContext, args: dict[str, Any]) -> dict[str, Any]:
 async def propose_sheet_write(ctx: ToolContext, args: dict[str, Any]) -> dict[str, Any]:
     token = await integrations.google_access_token(ctx.user.id, integrations.SPREADSHEETS_SCOPE)
     if not token:
-        return await _not_connected(ctx)
+        return await not_connected(ctx)
     parsed = google.parse_spreadsheet(str(args.get("url_or_id") or ""))
     if not parsed:
         return {"error": "That does not look like a Google Sheets link or id."}
@@ -137,7 +125,7 @@ async def propose_sheet_write(ctx: ToolContext, args: dict[str, Any]) -> dict[st
 async def search_email(ctx: ToolContext, args: dict[str, Any]) -> dict[str, Any]:
     token = await integrations.google_access_token(ctx.user.id, integrations.GMAIL_SCOPE)
     if not token:
-        return await _not_connected(ctx)
+        return await not_connected(ctx)
     result = await google.gmail_search(token, str(args.get("query") or ""), int(args.get("max") or 10))
     return result if isinstance(result, dict) and "error" in result else ok(result, source="Gmail")
 
@@ -152,9 +140,9 @@ async def search_email(ctx: ToolContext, args: dict[str, Any]) -> dict[str, Any]
     },
 )
 async def get_calendar(ctx: ToolContext, args: dict[str, Any]) -> dict[str, Any]:
-    token = await integrations.google_access_token(ctx.user.id, integrations.CALENDAR_SCOPE)
+    token = await integrations.google_access_token(ctx.user.id, integrations.CALENDAR_READ_SCOPE)
     if not token:
-        return await _not_connected(ctx)
+        return await not_connected(ctx)
     result = await google.calendar_events(token, str(args.get("from") or ""), str(args.get("to") or ""))
     return result if isinstance(result, dict) and "error" in result else ok(result, source="Google Calendar")
 
@@ -168,7 +156,7 @@ async def get_calendar(ctx: ToolContext, args: dict[str, Any]) -> dict[str, Any]
             "query": {"type": "string", "description": "Optional name or content search; leave empty to list"},
             "kind": {
                 "type": "string",
-                "enum": ["any", "folder", "spreadsheet", "document"],
+                "enum": ["any", "folder", "spreadsheet", "document", "pdf"],
                 "description": "Limit results to a Drive item type",
             },
             "max": {"type": "integer"},
@@ -178,7 +166,7 @@ async def get_calendar(ctx: ToolContext, args: dict[str, Any]) -> dict[str, Any]
 async def search_drive(ctx: ToolContext, args: dict[str, Any]) -> dict[str, Any]:
     token = await integrations.google_access_token(ctx.user.id, integrations.DRIVE_SCOPE)
     if not token:
-        return await _not_connected(ctx)
+        return await not_connected(ctx)
     result = await google.drive_search(
         token,
         str(args.get("query") or ""),

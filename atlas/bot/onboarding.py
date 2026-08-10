@@ -28,8 +28,8 @@ COMPLETE = (
 )
 
 COMPLETE_WITH_GOOGLE = (
-    "Setup complete — Google is connected. I can now read or write Sheets, search Gmail and Drive, "
-    "and use Calendar context alongside market research.\n"
+    "Setup complete — Google is connected. I can now read or write Sheets, search Gmail, read "
+    "Drive files, and schedule or review Calendar events alongside market research.\n"
     "Send me a company question, document, chart, or the Sheet you want to work with."
 )
 
@@ -48,8 +48,8 @@ QUESTIONS = {
         "When should a concise daily brief arrive? Include the time and timezone, or say “no brief.”"
     ),
     "google": (
-        "One Google connection enables private Sheets read/write, Gmail search, Calendar context, "
-        "and Drive search. Connect now, or skip Google for now?"
+        "One Google connection enables private Sheets read/write, Gmail search, Drive document "
+        "reading, and Calendar scheduling. Connect now, or skip Google for now?"
     ),
     "google_pending": (
         "Finish the Google consent in the link I sent, then say “connected” — or say “skip Google.”"

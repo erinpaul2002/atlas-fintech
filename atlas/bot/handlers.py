@@ -166,10 +166,21 @@ async def _access_allowed(inbound: Inbound, user, reply: StreamingReply) -> bool
 
 
 def _action_reply(result: dict) -> str:
+    if result.get("kind") == "calendar_event":
+        if result.get("ok"):
+            summary = str(result.get("summary") or "Calendar event")
+            start = result.get("start") or "the requested time"
+            if isinstance(start, dict):
+                start = start.get("dateTime") or start.get("date") or "the requested time"
+            link = str(result.get("html_link") or "")
+            suffix = f" [Open in Google Calendar]({link})." if link else ""
+            return f"Scheduled {summary} for {start}.{suffix}"
+        error = str(result.get("error") or "Google Calendar rejected the event.")
+        return f"I didn't create the calendar event: {error} Say retry after reconnecting and I'll continue."
     written = int(result.get("rows_written") or 0)
     if result.get("ok"):
         return f"Done — {written} rows written to {result.get('target', 'the sheet')}."
-    error = str(result.get("error") or "Google Sheets rejected the write.")
+    error = str(result.get("error") or "Google rejected the action.")
     if written:
         return f"I wrote {written} rows, then stopped: {error} Say retry and I'll resume without duplicating them."
     return f"I didn't write anything: {error} Say retry after reconnecting and I'll continue."

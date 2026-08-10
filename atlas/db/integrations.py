@@ -16,7 +16,8 @@ log = logging.getLogger(__name__)
 
 SPREADSHEETS_SCOPE = "https://www.googleapis.com/auth/spreadsheets"
 GMAIL_SCOPE = "https://www.googleapis.com/auth/gmail.readonly"
-CALENDAR_SCOPE = "https://www.googleapis.com/auth/calendar.readonly"
+CALENDAR_READ_SCOPE = "https://www.googleapis.com/auth/calendar.readonly"
+CALENDAR_SCOPE = "https://www.googleapis.com/auth/calendar.events"
 DRIVE_SCOPE = "https://www.googleapis.com/auth/drive.readonly"
 REQUESTED_SCOPES = [SPREADSHEETS_SCOPE, GMAIL_SCOPE, CALENDAR_SCOPE, DRIVE_SCOPE]
 TOKEN_URL = "https://oauth2.googleapis.com/token"
@@ -89,7 +90,7 @@ async def google_access_token(user_id: Any, required_scope: str | None = None) -
     integration = await google_for_user(user_id)
     if not integration or integration.status != "active":
         return None
-    if required_scope and required_scope not in integration.scopes:
+    if required_scope and not _scope_granted(integration.scopes, required_scope):
         return None
 
     if integration.expires_at and integration.expires_at > utcnow() + timedelta(seconds=60):
@@ -126,3 +127,9 @@ async def _mark_expired(user_id: Any) -> None:
     await db().integrations.update_one(
         {"user_id": user_id, "provider": "google"}, {"$set": {"status": "expired"}}
     )
+
+
+def _scope_granted(scopes: list[str], required_scope: str) -> bool:
+    if required_scope in scopes:
+        return True
+    return required_scope == CALENDAR_READ_SCOPE and CALENDAR_SCOPE in scopes

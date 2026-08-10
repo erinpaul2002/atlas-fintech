@@ -20,6 +20,7 @@ DRIVE_MIME_TYPES = {
     "folder": "application/vnd.google-apps.folder",
     "spreadsheet": "application/vnd.google-apps.spreadsheet",
     "document": "application/vnd.google-apps.document",
+    "pdf": "application/pdf",
 }
 
 
@@ -241,3 +242,8 @@ async def _write_json(method: str, url: str, token: str, what: str, **kwargs: An
         return response.json()
     except Exception as exc:
         return {"error": f"{what} failed ({type(exc).__name__})"}
+
+
+# Content extraction lives separately to keep this REST client compact.
+from atlas.services.google_calendar import create_calendar_event  # noqa: E402,F401
+from atlas.services.google_content import drive_read_file, gmail_get_message_full  # noqa: E402,F401

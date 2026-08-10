@@ -90,4 +90,13 @@ async def dispatch(name: str, args: dict[str, Any], ctx: ToolContext) -> tuple[d
 
 
 # populate the registry — import for side effects, last so the decorator exists first
-from atlas.agent.tools import filings, google, market, memory, research, search  # noqa: E402,F401
+from atlas.agent.tools import (  # noqa: E402,F401
+    filings,
+    google,
+    google_calendar,
+    google_content,
+    market,
+    memory,
+    research,
+    search,
+)
