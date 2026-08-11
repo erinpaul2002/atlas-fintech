@@ -117,3 +117,8 @@ async def watchers_of(symbol: str) -> list[User]:
 async def with_brief_due(hour: int, minute: int) -> list[User]:
     cursor = db().users.find({"brief_hour_local": hour, "brief_minute_local": minute})
     return [User(**d) async for d in cursor]
+
+
+async def with_briefs_enabled() -> list[User]:
+    cursor = db().users.find({"brief_hour_local": {"$ne": None}})
+    return [User(**d) async for d in cursor]

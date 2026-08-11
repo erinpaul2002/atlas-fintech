@@ -96,6 +96,7 @@ from atlas.agent.tools import (  # noqa: E402,F401
     google_calendar,
     google_content,
     market,
+    market_visuals,
     memory,
     research,
     search,

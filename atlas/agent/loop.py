@@ -6,9 +6,10 @@ the conversation so the model explains the gap; nothing raises into the chat.
 
 import asyncio
 import logging
+import re
 import time
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Awaitable, Callable
 
 from google.genai import types
 
@@ -32,12 +33,15 @@ class TurnResult:
     provider: str = "gemini"
     total_ms: int = 0
     proposed_action_id: Any = None
+    photos: list[dict[str, Any]] = field(default_factory=list)
+    visual_links: list[dict[str, str]] = field(default_factory=list)
 
 
 async def run_turn(
     user: User,
     turn: types.Content,
     on_delta=None,
+    on_progress: Callable[[str], Awaitable[None]] | None = None,
     connected: bool = False,
     pending_summary: str = "",
     first_turn: bool = False,
@@ -50,7 +54,7 @@ async def run_turn(
     contents = list(history if history is not None else await context_builder.history(user))
     contents.append(turn)
 
-    ctx = registry.ToolContext(user=user)
+    ctx = registry.ToolContext(user=user, extra={"telegram_photos": []})
     tools = registry.declarations()
     out = TurnResult()
     result = provider.Result()
@@ -66,7 +70,11 @@ async def run_turn(
             break
 
         contents.append(_model_turn(result))
+        if on_progress:
+            await on_progress(_tool_progress(result.function_calls))
         responses = await _run_tools(result.function_calls, ctx, out)
+        if on_progress:
+            await on_progress("Preparing your answer…")
         contents.append(types.Content(role="user", parts=responses))
         out.text = ""  # this round was tool traffic; the answer comes from the next one
     else:
@@ -78,8 +86,30 @@ async def run_turn(
 
     if not out.text.strip():
         out.text = EMPTY_REPLY if result.error or not result.text else result.text
+    out.text = _ensure_visual_links(out.text, out.visual_links)
+    out.photos = list(ctx.extra.get("telegram_photos") or [])
     out.total_ms = int((time.monotonic() - started) * 1000)
     return out
+
+
+def _tool_progress(calls: list[types.FunctionCall]) -> str:
+    """Translate internal tool names into honest, user-facing activity labels."""
+    names = {str(call.name or "") for call in calls}
+    if names & {"render_market_image", "render_visual"}:
+        return "Generating the visual…"
+    if names & {"read_sheet", "propose_sheet_write", "search_email", "get_calendar",
+                "search_drive", "get_email_detail", "read_drive_file", "propose_calendar_event"}:
+        return "Working with your Google data…"
+    if names & {"filings"}:
+        return "Checking SEC filings…"
+    if names & {"get_quote", "market_snapshot", "research_company", "compare_companies",
+                "explain_move"}:
+        return "Fetching live market data…"
+    if names & {"web_search"}:
+        return "Researching current information…"
+    if names & {"recall"}:
+        return "Checking our earlier conversations…"
+    return "Working through the details…"
 
 
 def _model_turn(result: provider.Result) -> types.Content:
@@ -115,6 +145,16 @@ async def _run_tools(
         )
         if payload.get("pending_action_id"):
             out.proposed_action_id = payload["pending_action_id"]
+        data = payload.get("data")
+        if call.name == "render_visual" and isinstance(data, dict) and data.get("url"):
+            out.visual_links.append(
+                {
+                    "url": str(data["url"]),
+                    "markdown": str(
+                        data.get("link_markdown") or f"[View interactive visual]({data['url']})"
+                    ),
+                }
+            )
         parts.append(
             types.Part(
                 function_response=types.FunctionResponse(
@@ -123,6 +163,24 @@ async def _run_tools(
             )
         )
     return parts
+
+
+PLAIN_VISUAL_LINK = re.compile(
+    r"(?im)^\s*view\s+(?:the\s+)?interactive\s+(?:visual|chart)\s*[.!]?\s*$"
+)
+
+
+def _ensure_visual_links(text: str, links: list[dict[str, str]]) -> str:
+    """A successful visual tool must never degrade into an unlinked label in Telegram."""
+    output = text.strip()
+    for link in links:
+        url = link["url"]
+        markdown = link["markdown"]
+        if url in output:
+            continue
+        replaced, count = PLAIN_VISUAL_LINK.subn(markdown, output, count=1)
+        output = replaced if count else f"{output}\n\n{markdown}".strip()
+    return output
 
 
 def _serialisable(payload: dict[str, Any]) -> dict[str, Any]:

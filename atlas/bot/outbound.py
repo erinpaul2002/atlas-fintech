@@ -12,7 +12,7 @@ import re
 import time
 from typing import Any, Awaitable, Callable
 
-from telegram import Bot
+from telegram import Bot, InputFile
 from telegram.constants import ChatAction, ParseMode
 from telegram.error import BadRequest, RetryAfter
 
@@ -21,6 +21,7 @@ log = logging.getLogger(__name__)
 EDIT_INTERVAL = 1.0
 CHUNK = 4000
 MIN_FIRST = 12
+INITIAL_PROGRESS = "Analyzing your request…"
 
 
 class StreamingReply:
@@ -38,6 +39,18 @@ class StreamingReply:
             await self.bot.send_chat_action(self.chat_id, ChatAction.TYPING)
         except Exception:
             pass
+
+    async def progress(self, text: str = INITIAL_PROGRESS) -> None:
+        """Show durable progress, then let streaming/final output replace the same message."""
+        text = text.strip()
+        if not text or text == self.shown:
+            return
+        await self.typing()
+        if self.message_id is None:
+            await self._send(text)
+            return
+        if time.monotonic() - self.last_edit >= EDIT_INTERVAL:
+            await self._edit(text)
 
     async def update(self, text: str) -> None:
         text = text.strip()
@@ -116,6 +129,42 @@ async def _deliver(action: Callable[[str, str | None], Awaitable[Any]], text: st
                 log.error("telegram send/edit failed: %s", exc)
                 return None
     return None
+
+
+async def send_text(bot: Bot, chat_id: int, text: str) -> bool:
+    """Send a non-streamed proactive message with the same safe formatting path."""
+    async def action(rendered: str, mode: str | None) -> Any:
+        return await bot.send_message(chat_id, rendered, parse_mode=mode)
+
+    return await _deliver(action, text) is not None
+
+
+async def send_photos(bot: Bot, chat_id: int, photos: list[dict[str, Any]]) -> int:
+    """Deliver ephemeral PNG artifacts. Bytes are never persisted or exposed to the model."""
+    sent = 0
+    for photo in photos:
+        data = photo.get("bytes")
+        if not isinstance(data, bytes):
+            continue
+        caption = str(photo.get("caption") or "")[:1000]
+        filename = str(photo.get("filename") or "atlas_chart.png")
+        for attempt in range(2):
+            try:
+                await bot.send_photo(
+                    chat_id=chat_id,
+                    photo=InputFile(data, filename=filename),
+                    caption=_html(caption),
+                    parse_mode=ParseMode.HTML,
+                )
+                sent += 1
+                break
+            except RetryAfter as exc:
+                await asyncio.sleep(float(exc.retry_after) + 0.5)
+            except Exception as exc:
+                log.error("telegram photo delivery failed: %s", exc)
+                if attempt:
+                    break
+    return sent
 
 
 SENTENCE_END = re.compile(r"[.!?:]\s*$|\n\s*$")

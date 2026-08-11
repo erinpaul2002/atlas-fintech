@@ -1,13 +1,16 @@
 """Telegram update → a normalized message with its media already downloaded.
 
-Media never gets a preprocessing pipeline: voice, image and PDF bytes attach straight to the
-model call (ARCHITECTURE.md §3). No Whisper, no OCR, no parser.
+Voice, image and PDF bytes attach directly to the model. Excel is parsed locally into a bounded
+text attachment because binary workbook support varies across model versions.
 """
 
+import asyncio
 import logging
 from dataclasses import dataclass, field
 
 from telegram import Bot, Update
+
+from atlas.services.excel import extract_workbook, is_excel
 
 log = logging.getLogger(__name__)
 
@@ -61,6 +64,8 @@ async def normalize(update: Update, bot: Bot) -> Inbound | None:
         inbound.media_kind = "document"
         inbound.filename = doc.file_name
         await _attach(inbound, bot, doc.file_id, doc.mime_type or "application/octet-stream", doc.file_size)
+        if inbound.media and is_excel(doc.file_name, doc.mime_type):
+            await _extract_excel(inbound)
 
     if not inbound.text and not inbound.media and not inbound.note:
         return None
@@ -80,3 +85,18 @@ async def _attach(inbound: Inbound, bot: Bot, file_id: str, mime: str, size: int
         return
     inbound.media.append((mime, data))
     inbound.media_ref = file_id
+
+
+async def _extract_excel(inbound: Inbound) -> None:
+    """Replace a binary workbook with bounded text; never execute formulas or macros."""
+    _, data = inbound.media[-1]
+    try:
+        extracted = await asyncio.to_thread(extract_workbook, data, inbound.filename or "workbook.xlsx")
+    except Exception as exc:
+        log.warning("Excel extraction failed for %s: %s", inbound.filename, exc)
+        inbound.note = "I couldn't parse this Excel workbook, so I received it as a raw file."
+        return
+
+    inbound.media[-1] = ("text/plain", extracted.encode("utf-8"))
+    inbound.media_kind = "spreadsheet"
+    inbound.note = "The Excel workbook was parsed locally; formulas use cached values and macros were not run."

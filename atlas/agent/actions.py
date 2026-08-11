@@ -193,6 +193,8 @@ async def confirm_and_execute(user: User, action: PendingAction) -> dict[str, An
         "kind": current.kind,
         "rows_written": written,
         "target": current.spec.get("target", "Sheet1"),
+        "spreadsheet_url": result.get("spreadsheet_url")
+        or google.spreadsheet_url(str(current.spec.get("spreadsheet_id") or "")),
     }
 
 
@@ -219,6 +221,7 @@ async def _execute_rows(action: PendingAction, token: str) -> dict[str, Any]:
     target = str(spec.get("target") or "Sheet1")
     values = [list(row) for row in spec.get("values") or []]
     written = int(action.rows_written or 0)
+    target_gid = spec.get("target_gid")
 
     if mode == "new_tab":
         titles = await google.spreadsheet_titles(token, spreadsheet_id)
@@ -233,6 +236,14 @@ async def _execute_rows(action: PendingAction, token: str) -> dict[str, Any]:
             created = await google.add_sheet(token, spreadsheet_id, target)
             if "error" in created:
                 return {"error": created["error"], "rows_written": written}
+            target_gid = (
+                ((created.get("replies") or [{}])[0].get("addSheet") or {})
+                .get("properties", {})
+                .get("sheetId")
+            )
+            if target_gid is not None:
+                spec["target_gid"] = target_gid
+                await db().pending_actions.update_one({"_id": action.id}, {"$set": {"spec": spec}})
         start_row = 1
         base = f"'{_escape_tab(target)}'!A"
     elif mode == "append":
@@ -259,7 +270,10 @@ async def _execute_rows(action: PendingAction, token: str) -> dict[str, Any]:
             return {"error": response["error"], "rows_written": written}
         written += len(batch)
         await db().pending_actions.update_one({"_id": action.id}, {"$set": {"rows_written": written}})
-    return {"rows_written": written}
+    return {
+        "rows_written": written,
+        "spreadsheet_url": google.spreadsheet_url(spreadsheet_id, target_gid),
+    }
 
 
 async def _execute_calendar_event(action: PendingAction, token: str) -> dict[str, Any]:

@@ -19,6 +19,7 @@ async def create(
         "natural_language": natural_language.strip(),
         "active": True,
         "last_fired_at": None,
+        "last_checked_at": None,
         "created_at": utcnow(),
     }
     res = await db().alerts.insert_one(doc)
@@ -50,3 +51,11 @@ async def due(kind: str) -> list[Alert]:
 
 async def mark_fired(alert_id: Any) -> None:
     await db().alerts.update_one({"_id": alert_id}, {"$set": {"last_fired_at": utcnow()}})
+
+
+async def mark_checked(alert_id: Any) -> None:
+    await db().alerts.update_one({"_id": alert_id}, {"$set": {"last_checked_at": utcnow()}})
+
+
+async def deactivate(alert_id: Any) -> None:
+    await db().alerts.update_one({"_id": alert_id}, {"$set": {"active": False}})

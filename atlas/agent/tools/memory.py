@@ -1,7 +1,9 @@
 """Memory, watchlist, alerts, profile. The tools that make the bot feel like it knows them."""
 
 import re
+from datetime import datetime
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from atlas.agent.tools.registry import ToolContext, ok, tool
 from atlas.db import alerts as alerts_repo
@@ -121,23 +123,34 @@ async def manage_watchlist(ctx: ToolContext, args: dict[str, Any]) -> dict[str, 
 @tool(
     "manage_alerts",
     """Create, list or cancel a background watch: a price move threshold, new SEC filings, news
-    on a company, or an earnings reminder. Store their exact wording — listing alerts reads it
-    back to them verbatim.""",
+    on a company, an earnings reminder, or a one-time/daily reminder at a specific local time.
+    Store their exact wording — listing alerts reads it back to them verbatim. Never turn a
+    clock-time reminder into a price_move alert.""",
     {
         "type": "object",
         "properties": {
             "action": {"type": "string", "enum": ["create", "list", "cancel"]},
-            "kind": {"type": "string", "enum": ["price_move", "filing", "news", "earnings"]},
+            "kind": {
+                "type": "string",
+                "enum": ["price_move", "filing", "news", "earnings", "time"],
+            },
             "symbol": {"type": "string"},
             "params": {
                 "type": "object",
                 "description": "price_move: {pct, direction: up|down|any}; filing: {forms: []}; "
-                "earnings: {offset_minutes}",
+                "earnings: {offset_minutes}; time: either {at, timezone, recurring: once} or "
+                "{hour_local, minute_local, timezone, recurring: daily, message}",
                 "properties": {
                     "pct": {"type": "number"},
                     "direction": {"type": "string", "enum": ["up", "down", "any"]},
                     "forms": {"type": "array", "items": {"type": "string"}},
                     "offset_minutes": {"type": "integer"},
+                    "at": {"type": "string", "description": "RFC 3339 time for a one-time reminder"},
+                    "hour_local": {"type": "integer", "minimum": 0, "maximum": 23},
+                    "minute_local": {"type": "integer", "minimum": 0, "maximum": 59},
+                    "timezone": {"type": "string", "description": "IANA timezone, e.g. Asia/Kolkata"},
+                    "recurring": {"type": "string", "enum": ["once", "daily"]},
+                    "message": {"type": "string"},
                 },
             },
             "natural_language": {"type": "string", "description": "What they asked for, in their own words"},
@@ -161,11 +174,26 @@ async def manage_alerts(ctx: ToolContext, args: dict[str, Any]) -> dict[str, Any
         return ok({"cancelled": n}, source="their alerts")
 
     kind = str(args.get("kind") or "news")
+    params = dict(args.get("params") or {})
+    if kind == "price_move":
+        try:
+            threshold = float(params.get("pct") or 0)
+        except (TypeError, ValueError):
+            threshold = 0
+        if threshold <= 0:
+            return {"error": "A price alert needs a positive percentage threshold."}
+        params["pct"] = threshold
+        params["direction"] = str(params.get("direction") or "any")
+    elif kind == "time":
+        params, error = _time_alert_params(params, ctx.user.timezone)
+        if error:
+            return {"error": error}
+
     alert = await alerts_repo.create(
         ctx.user.id,
         kind=kind,
         symbol=args.get("symbol"),
-        params=args.get("params") or {},
+        params=params,
         natural_language=str(args.get("natural_language") or ""),
     )
     return ok(
@@ -173,6 +201,50 @@ async def manage_alerts(ctx: ToolContext, args: dict[str, Any]) -> dict[str, Any
                      "their_words": alert.natural_language}},
         source="their alerts",
     )
+
+
+def _time_alert_params(
+    params: dict[str, Any], user_timezone: str
+) -> tuple[dict[str, Any], str | None]:
+    """Validate and normalize time alerts before they become durable promises."""
+    timezone_name = str(params.get("timezone") or user_timezone or "UTC").strip()
+    try:
+        zone = ZoneInfo(timezone_name)
+    except (KeyError, ValueError):
+        return {}, f"Unknown timezone: {timezone_name}."
+    recurring = str(params.get("recurring") or ("once" if params.get("at") else "daily")).lower()
+    if recurring not in {"once", "daily"}:
+        return {}, "A time alert must recur either once or daily."
+
+    normalized: dict[str, Any] = {
+        "timezone": timezone_name,
+        "recurring": recurring,
+        "message": str(params.get("message") or "Scheduled reminder").strip(),
+        # A sleeping host can still deliver shortly after it wakes up.
+        "grace_minutes": 180,
+    }
+    if params.get("at"):
+        try:
+            raw = str(params["at"]).strip().replace("Z", "+00:00")
+            at = datetime.fromisoformat(raw)
+            if at.tzinfo is None:
+                at = at.replace(tzinfo=zone)
+        except (TypeError, ValueError):
+            return {}, "A one-time alert needs a valid RFC 3339 date and time."
+        if recurring != "once":
+            return {}, "Use a local hour and minute for a daily alert."
+        normalized["at"] = at.isoformat()
+        return normalized, None
+
+    try:
+        hour = int(params["hour_local"])
+        minute = int(params.get("minute_local") or 0)
+    except (KeyError, TypeError, ValueError):
+        return {}, "A time alert needs a local hour (and optional minute)."
+    if not 0 <= hour <= 23 or not 0 <= minute <= 59:
+        return {}, "The reminder time must use hour 0-23 and minute 0-59."
+    normalized.update({"hour_local": hour, "minute_local": minute})
+    return normalized, None
 
 
 @tool(

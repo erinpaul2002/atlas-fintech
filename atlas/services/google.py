@@ -71,6 +71,11 @@ def parse_spreadsheet(value: str) -> tuple[str, str | None] | None:
     return None
 
 
+def spreadsheet_url(spreadsheet_id: str, gid: int | str | None = None) -> str:
+    url = f"https://docs.google.com/spreadsheets/d/{spreadsheet_id}/edit"
+    return f"{url}#gid={gid}" if gid is not None and str(gid).strip() else url
+
+
 async def public_sheet(spreadsheet_id: str, gid: str | None = None, range_: str | None = None) -> Any:
     params: dict[str, str] = {"format": "csv"}
     if gid:

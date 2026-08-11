@@ -102,6 +102,7 @@ class Alert(Doc):
     natural_language: str = ""
     active: bool = True
     last_fired_at: datetime | None = None
+    last_checked_at: datetime | None = None
     created_at: datetime = Field(default_factory=utcnow)
 
 

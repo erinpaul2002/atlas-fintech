@@ -5,6 +5,7 @@ import logging
 from contextlib import asynccontextmanager
 
 import uvicorn
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from fastapi import FastAPI
 from telegram.ext import Application
 
@@ -16,6 +17,7 @@ from atlas.config import settings
 from atlas.db.client import close as close_db
 from atlas.db.client import ensure_indexes
 from atlas.llm import provider
+from atlas.jobs.heartbeat import run as run_heartbeat
 from atlas.services import yfinance_client
 from atlas.services.util import close_http
 
@@ -52,11 +54,26 @@ async def lifespan(app: FastAPI):
     me = await bot_app.bot.get_me()
     log.info("polling as @%s", me.username)
 
+    scheduler = AsyncIOScheduler(timezone="UTC")
+    scheduler.add_job(
+        run_heartbeat,
+        "interval",
+        minutes=1,
+        args=[bot_app.bot],
+        id="atlas-heartbeat",
+        max_instances=1,
+        coalesce=True,
+        misfire_grace_time=50,
+    )
+    scheduler.start()
+    app.state.scheduler = scheduler
+
     warm = asyncio.create_task(_warm())
     try:
         yield
     finally:
         warm.cancel()
+        scheduler.shutdown(wait=False)
         await bot_app.updater.stop()
         await bot_app.stop()
         await bot_app.shutdown()

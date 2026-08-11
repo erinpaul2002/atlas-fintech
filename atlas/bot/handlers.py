@@ -12,7 +12,7 @@ from telegram.ext import Application, ContextTypes, MessageHandler, filters
 from atlas.agent import actions, background, context as context_builder, loop
 from atlas.bot import onboarding
 from atlas.bot.inbound import Inbound, normalize
-from atlas.bot.outbound import StreamingReply
+from atlas.bot.outbound import StreamingReply, send_photos
 from atlas.config import settings
 from atlas.db import messages as messages_repo
 from atlas.db import traces as traces_repo
@@ -28,12 +28,17 @@ EVALUATORS_ONLY = "Sorry, this preview build of Atlas is restricted to authorize
 
 
 async def on_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    inbound = await normalize(update, ctx.bot)
-    if inbound is None:
+    chat = update.effective_chat
+    if chat is None:
         return
 
-    reply = StreamingReply(ctx.bot, inbound.chat_id)
-    await reply.typing()
+    # Start before media download/Excel extraction so even preprocessing never looks stalled.
+    reply = StreamingReply(ctx.bot, chat.id)
+    await reply.progress()
+    inbound = await normalize(update, ctx.bot)
+    if inbound is None:
+        await reply.finish("I couldn't read that message. Please send it again.")
+        return
 
     try:
         await _handle(inbound, reply)
@@ -112,12 +117,15 @@ async def _handle(inbound: Inbound, reply: StreamingReply) -> None:
         user,
         turn,
         on_delta=reply.update,
+        on_progress=reply.progress,
         connected=connected,
         pending_summary=pending_summary,
         first_turn=first_turn,
         history=prior_history,
     )
     final = await reply.finish(result.text)
+    if result.photos:
+        await send_photos(reply.bot, inbound.chat_id, result.photos)
 
     await messages_repo.append(user.id, "assistant", final)
     await traces_repo.write(
@@ -179,7 +187,9 @@ def _action_reply(result: dict) -> str:
         return f"I didn't create the calendar event: {error} Say retry after reconnecting and I'll continue."
     written = int(result.get("rows_written") or 0)
     if result.get("ok"):
-        return f"Done — {written} rows written to {result.get('target', 'the sheet')}."
+        link = str(result.get("spreadsheet_url") or "")
+        suffix = f" [Open spreadsheet]({link})." if link else ""
+        return f"Done — {written} rows written to {result.get('target', 'the sheet')}.{suffix}"
     error = str(result.get("error") or "Google rejected the action.")
     if written:
         return f"I wrote {written} rows, then stopped: {error} Say retry and I'll resume without duplicating them."

@@ -77,6 +77,9 @@ def _history(symbol: str, period: str) -> list[dict[str, Any]]:
     return [
         {
             "date": str(idx.date()),
+            "open": round(float(row["Open"]), 4),
+            "high": round(float(row["High"]), 4),
+            "low": round(float(row["Low"]), 4),
             "close": round(float(row["Close"]), 4),
             "volume": int(row["Volume"]) if row["Volume"] == row["Volume"] else 0,
         }
@@ -86,6 +89,25 @@ def _history(symbol: str, period: str) -> list[dict[str, Any]]:
 
 async def history(symbol: str, period: str = "1mo") -> Any:
     return await in_thread(_history, symbol.upper().strip(), period, timeout=20, what=f"yfinance history {symbol}")
+
+
+def _history_frame(symbol: str, period: str):
+    frame = yf.Ticker(symbol).history(period=period, auto_adjust=False)
+    if frame is None or frame.empty:
+        raise ValueError(f"no history for {symbol}")
+    required = ["Open", "High", "Low", "Close", "Volume"]
+    return frame[required].dropna(subset=["Open", "High", "Low", "Close"])
+
+
+async def history_frame(symbol: str, period: str = "3mo") -> Any:
+    """Full OHLCV frame for deterministic server-side chart rendering."""
+    return await in_thread(
+        _history_frame,
+        symbol.upper().strip(),
+        period,
+        timeout=25,
+        what=f"yfinance OHLCV history {symbol}",
+    )
 
 
 def _income(symbol: str) -> dict[str, Any]:

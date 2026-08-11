@@ -3,6 +3,7 @@
 import math
 import re
 from typing import Any
+from urllib.parse import urlparse
 
 from atlas.agent.tools.registry import ToolContext, ok, tool
 from atlas.config import settings
@@ -62,9 +63,11 @@ async def render_visual(ctx: ToolContext, args: dict[str, Any]) -> dict[str, Any
         return {"error": "visuals require a saved Atlas user"}
 
     try:
-        public_base_url = settings.effective_public_base_url
+        public_base_url = _telegram_safe_base_url(settings.effective_public_base_url)
     except ValueError:
-        return {"error": "visual links are not configured on this deployment"}
+        return {
+            "error": "interactive visual links require a public HTTPS base URL; localhost cannot be opened from Telegram"
+        }
     html_content = render_visual_html(spec)
     visual_id = await visuals_repo.save_visual(
         ctx.user.id,
@@ -105,6 +108,14 @@ def normalize_visual(args: dict[str, Any]) -> dict[str, Any]:
     else:
         spec.update(_normalize_chart(args, doughnut=kind == "doughnut"))
     return spec
+
+
+def _telegram_safe_base_url(value: str) -> str:
+    parsed = urlparse(value)
+    local_hosts = {"localhost", "127.0.0.1", "0.0.0.0", "::1"}
+    if parsed.scheme != "https" or not parsed.hostname or parsed.hostname.lower() in local_hosts:
+        raise ValueError("visual base must be public HTTPS")
+    return value.rstrip("/")
 
 
 def _normalize_chart(args: dict[str, Any], doughnut: bool) -> dict[str, Any]:
