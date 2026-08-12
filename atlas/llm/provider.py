@@ -14,6 +14,7 @@ import httpx
 from google.genai import Client, types
 
 from atlas.config import settings
+from atlas.llm.transcription import transcribe_audio
 
 log = logging.getLogger(__name__)
 
@@ -62,6 +63,12 @@ def has_media(contents: list[types.Content]) -> bool:
     )
 
 
+def _gemini_models() -> list[str]:
+    """Configured Gemini tiers, in order, without blank or duplicate model IDs."""
+    configured = (settings.gemini_model.strip(), settings.gemini_fallback_model.strip())
+    return list(dict.fromkeys(filter(None, configured)))
+
+
 async def stream(
     system: str,
     contents: list[types.Content],
@@ -71,23 +78,38 @@ async def stream(
 ) -> Result:
     """One model turn. Streams text deltas through `on_delta`, returns text + any function calls.
 
-    Gemini errors twice → a text-only fallback provider takes the turn, unless media is
-    attached, in which case there is nothing to fall back to (ARCHITECTURE.md §1.4).
+    Each Gemini tier gets up to two attempts. If every tier fails, voice notes are transcribed
+    before the text fallback; other media cannot use that final tier.
     """
     last_exc: Exception | None = None
-    for attempt in range(ATTEMPTS):
-        try:
-            return await _stream_gemini(system, contents, tools, on_delta, temperature)
-        except Exception as exc:
-            last_exc = exc
-            log.warning("gemini attempt %d failed: %s", attempt + 1, str(exc)[:200])
-            if _out_of_quota(exc):
-                break  # a daily cap does not clear in 600ms — go to the fallback now
-            await asyncio.sleep(0.6 * (attempt + 1))
+    for model_index, model in enumerate(_gemini_models()):
+        if model_index:
+            log.warning("failing over to Gemini model %s", model)
+        for attempt in range(ATTEMPTS):
+            try:
+                return await _stream_gemini(
+                    system, contents, tools, on_delta, temperature, model=model
+                )
+            except Exception as exc:
+                last_exc = exc
+                log.warning(
+                    "gemini model %s attempt %d failed: %s",
+                    model, attempt + 1, str(exc)[:200],
+                )
+                if _out_of_quota(exc):
+                    break
+                if attempt < ATTEMPTS - 1:
+                    await asyncio.sleep(0.6 * (attempt + 1))
 
     if has_media(contents):
-        log.error("gemini failed on a media turn, no fallback: %s", last_exc)
-        return Result(text="", provider="gemini", error=str(last_exc))
+        try:
+            contents = await transcribe_audio(contents)
+        except Exception as exc:
+            log.error("all Gemini models and voice transcription failed: %s", exc)
+            return Result(text="", provider="gemini", error=str(exc))
+        if has_media(contents):
+            log.error("all Gemini models failed on a non-audio media turn: %s", last_exc)
+            return Result(text="", provider="gemini", error=str(last_exc))
 
     try:
         return await _fallback(system, contents, on_delta)
@@ -102,10 +124,13 @@ async def _stream_gemini(
     tools: list[types.Tool] | None,
     on_delta: OnDelta,
     temperature: float,
+    model: str | None = None,
 ) -> Result:
     out = Result()
     iterator = await _client.aio.models.generate_content_stream(
-        model=settings.gemini_model, contents=contents, config=_config(system, tools, temperature)
+        model=model or settings.gemini_model,
+        contents=contents,
+        config=_config(system, tools, temperature),
     )
     async for chunk in iterator:
         for part in _parts(chunk):
@@ -131,24 +156,38 @@ def _parts(chunk: Any) -> list[types.Part]:
     return list(content.parts or []) if content else []
 
 
+async def _generate_with_failover(
+    contents: Any, config: types.GenerateContentConfig, operation: str
+) -> tuple[Any | None, Exception | None]:
+    last_exc: Exception | None = None
+    for model in _gemini_models():
+        for attempt in range(ATTEMPTS):
+            try:
+                response = await _client.aio.models.generate_content(
+                    model=model, contents=contents, config=config
+                )
+                return response, None
+            except Exception as exc:
+                last_exc = exc
+                log.warning(
+                    "%s model %s attempt %d failed: %s",
+                    operation, model, attempt + 1, str(exc)[:200],
+                )
+                if _out_of_quota(exc):
+                    break
+                if attempt < ATTEMPTS - 1:
+                    await asyncio.sleep(0.6 * (attempt + 1))
+    return None, last_exc
+
+
 async def generate(system: str, prompt: str, temperature: float = 0.4, json_schema: dict | None = None) -> str:
     """Non-streaming single-shot — digests, fact extraction, the narrative, brief passes."""
     config = _config(system, None, temperature)
     if json_schema:
         config.response_mime_type = "application/json"
         config.response_json_schema = json_schema
-    for attempt in range(ATTEMPTS):
-        try:
-            r = await _client.aio.models.generate_content(
-                model=settings.gemini_model, contents=prompt, config=config
-            )
-            return r.text or ""
-        except Exception as exc:
-            log.warning("generate attempt %d failed: %s", attempt + 1, str(exc)[:200])
-            if attempt == ATTEMPTS - 1:
-                return ""
-            await asyncio.sleep(0.6)
-    return ""
+    response, _ = await _generate_with_failover(prompt, config, "generate")
+    return response.text or "" if response else ""
 
 
 async def ground(query: str) -> dict[str, Any]:
@@ -159,17 +198,13 @@ async def ground(query: str) -> dict[str, Any]:
     function whose implementation issues this second, grounding-only request —
     ARCHITECTURE.md §1.1 open item 2, resolved.
     """
-    try:
-        r = await _client.aio.models.generate_content(
-            model=settings.gemini_model,
-            contents=query,
-            config=types.GenerateContentConfig(
-                tools=[types.Tool(google_search=types.GoogleSearch())],
-                temperature=0.2,
-                http_options=types.HttpOptions(timeout=GEMINI_TIMEOUT_MS),
-            ),
-        )
-    except Exception as exc:
+    config = types.GenerateContentConfig(
+        tools=[types.Tool(google_search=types.GoogleSearch())],
+        temperature=0.2,
+        http_options=types.HttpOptions(timeout=GEMINI_TIMEOUT_MS),
+    )
+    r, exc = await _generate_with_failover(query, config, "ground")
+    if not r:
         return {"error": f"web search failed: {str(exc)[:150]}"}
 
     sources: list[dict[str, str]] = []

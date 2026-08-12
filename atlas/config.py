@@ -32,6 +32,11 @@ class Settings(BaseSettings):
     # gives 500. Quota, not quality, picks this until billing is on — then GEMINI_MODEL=
     # gemini-3.5-flash in the env is the whole upgrade.
     gemini_model: str = "gemini-3.5-flash-lite"
+    # Set empty (or equal to GEMINI_MODEL) to disable the multimodal failover tier.
+    gemini_fallback_model: str = "gemini-3.1-flash-lite"
+    transcription_api_key: str = ""
+    transcription_url: str = "https://api.groq.com/openai/v1/audio/transcriptions"
+    transcription_model: str = "whisper-large-v3-turbo"
     fallback_model: str = "@cf/meta/llama-4-scout-17b-16e-instruct"
     fallback_url: str = "https://api.groq.com/openai/v1/chat/completions"
     embed_model: str = "gemini-embedding-001"
