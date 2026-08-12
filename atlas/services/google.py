@@ -10,6 +10,7 @@ from urllib.parse import parse_qs, quote, urlencode, urlparse
 
 from atlas.config import settings
 from atlas.db.integrations import REQUESTED_SCOPES
+from atlas.services.google_drive import drive_name_key, fuzzy_drive_files
 from atlas.services.google_links import gmail_thread_url
 from atlas.services.util import http
 
@@ -23,6 +24,7 @@ DRIVE_MIME_TYPES = {
     "document": "application/vnd.google-apps.document",
     "pdf": "application/pdf",
 }
+DRIVE_FIELDS = "files(id,name,mimeType,modifiedTime,webViewLink,description,parents)"
 
 
 def authorization_url(state: str) -> str:
@@ -212,29 +214,46 @@ async def drive_search(
     query: str = "",
     maximum: int = 10,
     kind: str = "any",
+    include_content: bool = False,
+    exact_name: bool = False,
 ) -> Any:
     escaped = query.strip().replace("'", "\\'")
     clauses = ["trashed = false"]
     if escaped:
-        clauses.append(f"(name contains '{escaped}' or fullText contains '{escaped}')")
+        name_query = f"name contains '{escaped}'"
+        clauses.append(
+            f"({name_query} or fullText contains '{escaped}')" if include_content else name_query
+        )
     mime_type = DRIVE_MIME_TYPES.get(kind)
-    if mime_type:
-        clauses.append(f"mimeType = '{mime_type}'")
+    mime_clause = (
+        f"mimeType = '{mime_type}'" if mime_type
+        else "mimeType contains 'image/'" if kind == "image"
+        else None
+    )
+    if mime_clause:
+        clauses.append(mime_clause)
     data = await _get_json(
         "https://www.googleapis.com/drive/v3/files", token, "Google Drive search",
         params={
             "q": " and ".join(clauses),
             "pageSize": max(1, min(maximum, 50)),
             "orderBy": "modifiedTime desc",
-            "fields": "files(id,name,mimeType,modifiedTime,webViewLink,description,parents)",
+            "fields": DRIVE_FIELDS,
         },
     )
     if "error" in data:
         return data
-    return [
-        {**item, "web_url": item.get("webViewLink", "")}
-        for item in data.get("files", [])
-    ]
+    files = data.get("files", [])
+    if escaped and exact_name:
+        needle = drive_name_key(query)
+        files = [item for item in files if drive_name_key(str(item.get("name") or "")) == needle]
+    if not files and escaped:
+        files = await fuzzy_drive_files(
+            _get_json, token, query, maximum, mime_clause, DRIVE_FIELDS
+        )
+        if isinstance(files, dict):
+            files = []  # optional typo recovery failing must not erase a successful exact search
+    return [{**item, "web_url": item.get("webViewLink", "")} for item in files]
 
 
 async def _get_json(url: str, token: str, what: str, params: Any = None) -> dict[str, Any]:

@@ -18,6 +18,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from google.genai import types
 
 from atlas.agent import context as context_builder
+from atlas.agent.drive_guard import required_drive_args
 from atlas.agent.tools import registry
 from atlas.db.models import User
 from atlas.llm import provider
@@ -64,12 +65,37 @@ async def run_turn(
     tools = registry.declarations()
     out = TurnResult()
     result = provider.Result()
+    required_drive = required_drive_args(turn)
+    forced_drive = False
 
     for round_no in range(MAX_ROUNDS):
         out.rounds = round_no + 1
-        result = await provider.stream(system, contents, tools, on_delta=on_delta)
+        # Buffer the model's first Drive-discovery response until it proves it called Drive.
+        # Otherwise an invented file/link can briefly stream into Telegram before the guard
+        # replaces the final message with API-backed results.
+        drive_fetched = any(call.get("name") == "search_drive" for call in out.tool_calls)
+        round_delta = None if required_drive and not drive_fetched else on_delta
+        result = await provider.stream(system, contents, tools, on_delta=round_delta)
         out.provider = result.provider
         _add_tokens(out, result)
+
+        if not result.function_calls and required_drive and not forced_drive and not any(
+            call.get("name") == "search_drive" for call in out.tool_calls
+        ):
+            forced_drive = True
+            call = types.FunctionCall(name="search_drive", args=required_drive)
+            log.warning("model skipped search_drive for a clear Drive request; enforcing the fetch")
+            contents.append(
+                types.Content(role="model", parts=[types.Part(function_call=call)])
+            )
+            if on_progress:
+                await on_progress(_tool_progress([call]))
+            responses = await _run_tools([call], ctx, out)
+            if on_progress:
+                await on_progress("Preparing your answerâ€¦")
+            contents.append(types.Content(role="user", parts=responses))
+            out.text = ""
+            continue
 
         if not result.function_calls:
             out.text = result.text
@@ -92,6 +118,7 @@ async def run_turn(
 
     if not out.text.strip():
         out.text = EMPTY_REPLY if result.error or not result.text else result.text
+    out.text = _drive_failure_text(out.text, required_drive, out)
     out.text = _ensure_visual_links(out.text, out.visual_links)
     out.text = _ensure_resource_links(out.text, out.resource_links)
     out.text = _repair_collection_dump(out.text, out.collection_results, out.tool_calls, user)
@@ -142,18 +169,19 @@ async def _run_tools(
     )
     parts: list[types.Part] = []
     for call, (payload, ms, succeeded) in zip(calls, results):
-        out.tool_calls.append(
-            {
-                "name": call.name,
-                "args": dict(call.args or {}),
-                "ms": ms,
-                "ok": succeeded,
-                "error": payload.get("error") if not succeeded else None,
-            }
-        )
+        data = payload.get("data")
+        trace = {
+            "name": call.name,
+            "args": dict(call.args or {}),
+            "ms": ms,
+            "ok": succeeded,
+            "error": payload.get("error") if not succeeded else None,
+        }
+        if isinstance(data, list):
+            trace["result_count"] = len(data)
+        out.tool_calls.append(trace)
         if payload.get("pending_action_id"):
             out.proposed_action_id = payload["pending_action_id"]
-        data = payload.get("data")
         if call.name in {"search_email", "get_calendar", "search_drive"} and isinstance(data, list):
             out.collection_results.append(
                 {"name": call.name, "data": data, "args": dict(call.args or {})}
@@ -163,6 +191,17 @@ async def _run_tools(
                 {
                     "url": str(data["spreadsheet_url"]),
                     "markdown": f"[Open spreadsheet]({data['spreadsheet_url']})",
+                }
+            )
+        if (
+            call.name == "search_drive"
+            and payload.get("error") == "not_connected"
+            and payload.get("link")
+        ):
+            out.resource_links.append(
+                {
+                    "url": str(payload["link"]),
+                    "markdown": f"[Connect Google]({payload['link']})",
                 }
             )
         if call.name == "render_visual" and isinstance(data, dict) and data.get("url"):
@@ -210,6 +249,18 @@ def _ensure_resource_links(text: str, links: list[dict[str, str]]) -> str:
     return output
 
 
+def _drive_failure_text(text: str, required: dict[str, Any] | None, out: TurnResult) -> str:
+    """A failed required fetch must not fall back to an invented Drive answer."""
+    if not required or out.collection_results:
+        return text
+    calls = [call for call in out.tool_calls if call.get("name") == "search_drive"]
+    if not calls:
+        return text
+    if calls[-1].get("error") == "not_connected":
+        return "Google Drive needs to be connected before I can search it."
+    return "I couldn't search Google Drive just now â€” try again in a moment."
+
+
 DETAIL_TOOLS = {"get_email_detail", "read_drive_file"}
 MIME_LABELS = {
     "application/vnd.google-apps.folder": "Folder",
@@ -232,6 +283,10 @@ def _repair_collection_dump(
     collection = collections[0]
     rows = collection.get("data") or []
     name = collection.get("name")
+    if name == "search_drive":
+        # Drive discovery replies are API-owned. Never preserve a model-invented file or link,
+        # including when the real result is empty.
+        return _format_drive_list(rows, _zone(user.timezone))
     urls = _collection_urls(rows)
     missing_links = any(url not in text for url in urls)
     if (

@@ -166,9 +166,17 @@ async def get_calendar(ctx: ToolContext, args: dict[str, Any]) -> dict[str, Any]
         "type": "object",
         "properties": {
             "query": {"type": "string", "description": "Optional name or content search; leave empty to list"},
+            "include_content": {
+                "type": "boolean",
+                "description": "Search inside file contents too; false for filename/folder-name searches",
+            },
+            "exact_name": {
+                "type": "boolean",
+                "description": "Match only this filename/base filename when the user says named or called",
+            },
             "kind": {
                 "type": "string",
-                "enum": ["any", "folder", "spreadsheet", "document", "pdf"],
+                "enum": ["any", "folder", "spreadsheet", "document", "pdf", "image"],
                 "description": "Limit results to a Drive item type",
             },
             "max": {"type": "integer"},
@@ -184,6 +192,8 @@ async def search_drive(ctx: ToolContext, args: dict[str, Any]) -> dict[str, Any]
         str(args.get("query") or ""),
         int(args.get("max") or 10),
         str(args.get("kind") or "any"),
+        bool(args.get("include_content", False)),
+        bool(args.get("exact_name", False)),
     )
     return result if isinstance(result, dict) and "error" in result else ok(
         result,
