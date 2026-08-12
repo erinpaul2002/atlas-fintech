@@ -10,6 +10,7 @@ from urllib.parse import quote
 
 from pypdf import PdfReader
 
+from atlas.services.google_links import gmail_thread_url
 from atlas.services.util import http
 
 GOOGLE_DOC = "application/vnd.google-apps.document"
@@ -59,9 +60,11 @@ async def gmail_get_message_full(token: str, message_id: str) -> dict[str, Any]:
     if not body:
         body = str(data.get("snippet") or "")
     body, truncated, char_count = _bounded(body)
+    thread_id = data.get("threadId", "")
     return {
         "id": message_id,
-        "thread_id": data.get("threadId", ""),
+        "thread_id": thread_id,
+        "web_url": gmail_thread_url(thread_id),
         "subject": headers.get("subject", ""),
         "from": headers.get("from", ""),
         "to": headers.get("to", ""),

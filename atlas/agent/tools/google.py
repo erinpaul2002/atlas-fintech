@@ -40,7 +40,8 @@ async def read_sheet(ctx: ToolContext, args: dict[str, Any]) -> dict[str, Any]:
 
     rows = await google.public_sheet(spreadsheet_id, gid=gid, range_=range_)
     if isinstance(rows, list):
-        return ok(google.sheet_result(rows), source="Google Sheets (public link)", as_of=now_iso())
+        data = {**google.sheet_result(rows), "spreadsheet_url": google.spreadsheet_url(spreadsheet_id, gid)}
+        return ok(data, source="Google Sheets (public link)", as_of=now_iso())
 
     token = await integrations.google_access_token(ctx.user.id, integrations.SPREADSHEETS_SCOPE)
     if not token:
@@ -48,7 +49,8 @@ async def read_sheet(ctx: ToolContext, args: dict[str, Any]) -> dict[str, Any]:
     rows = await google.sheet_values(token, spreadsheet_id, range_ or "A:Z")
     if not isinstance(rows, list):
         return rows
-    return ok(google.sheet_result(rows), source="Google Sheets", as_of=now_iso())
+    data = {**google.sheet_result(rows), "spreadsheet_url": google.spreadsheet_url(spreadsheet_id, gid)}
+    return ok(data, source="Google Sheets", as_of=now_iso())
 
 
 @tool(
@@ -127,7 +129,12 @@ async def search_email(ctx: ToolContext, args: dict[str, Any]) -> dict[str, Any]
     if not token:
         return await not_connected(ctx)
     result = await google.gmail_search(token, str(args.get("query") or ""), int(args.get("max") or 10))
-    return result if isinstance(result, dict) and "error" in result else ok(result, source="Gmail")
+    return result if isinstance(result, dict) and "error" in result else ok(
+        result,
+        source="Gmail",
+        as_of=now_iso(),
+        presentation="Lead with the match count; show one email per line as sender — linked subject · time using web_url.",
+    )
 
 
 @tool(
@@ -144,7 +151,12 @@ async def get_calendar(ctx: ToolContext, args: dict[str, Any]) -> dict[str, Any]
     if not token:
         return await not_connected(ctx)
     result = await google.calendar_events(token, str(args.get("from") or ""), str(args.get("to") or ""))
-    return result if isinstance(result, dict) and "error" in result else ok(result, source="Google Calendar")
+    return result if isinstance(result, dict) and "error" in result else ok(
+        result,
+        source="Google Calendar",
+        as_of=now_iso(),
+        presentation="Lead with the event count; show one event per line as time — linked title using web_url.",
+    )
 
 
 @tool(
@@ -173,4 +185,9 @@ async def search_drive(ctx: ToolContext, args: dict[str, Any]) -> dict[str, Any]
         int(args.get("max") or 10),
         str(args.get("kind") or "any"),
     )
-    return result if isinstance(result, dict) and "error" in result else ok(result, source="Google Drive")
+    return result if isinstance(result, dict) and "error" in result else ok(
+        result,
+        source="Google Drive",
+        as_of=now_iso(),
+        presentation="Lead with the match count; show one file per line as linked name using web_url — type · modified date.",
+    )

@@ -4,10 +4,14 @@ import asyncio
 import hashlib
 import json
 import logging
+import re
 from datetime import datetime, time, timedelta, timezone
 from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
+# Tool modules register themselves while the registry loads. Import the registry first so this
+# background job never enters market.py halfway through that registration cycle.
+from atlas.agent.tools import registry as _tool_registry  # noqa: F401
 from atlas.agent.tools.market import quotes_for
 from atlas.bot.outbound import send_text
 from atlas.db import deliveries, facts as facts_repo, messages as messages_repo, seen, users
@@ -27,6 +31,28 @@ MARKET_SYMBOLS = {
 }
 
 log = logging.getLogger(__name__)
+
+BRIEF_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "items": {
+            "type": "array",
+            "maxItems": 3,
+            "items": {
+                "type": "object",
+                "properties": {
+                    "key": {"type": "string"},
+                    "label": {"type": "string"},
+                    "insight": {"type": "string"},
+                },
+                "required": ["key", "label", "insight"],
+                "additionalProperties": False,
+            },
+        }
+    },
+    "required": ["items"],
+    "additionalProperties": False,
+}
 
 
 async def run(bot: Any, now: datetime | None = None) -> None:
@@ -55,14 +81,15 @@ async def _run_user(bot: Any, user: User, now: datetime) -> None:
 
     candidates = await gather(user, now)
     novel = [candidate for candidate in candidates if not await seen.contains(user.id, candidate["key"])]
-    selected = keep(novel, limit=5)
+    # Three well-spaced decisions beat five headlines squeezed into a phone screen.
+    selected = keep(novel, limit=3)
     if len(selected) < 2:
         await deliveries.record(
             user.id, "morning_brief", item_count=0, candidates_considered=len(candidates)
         )
         return
 
-    brief = await _write(user, selected)
+    brief = await _write(user, selected, now)
     if not brief or not await send_text(bot, user.telegram_chat_id, brief):
         return
     for candidate in selected:
@@ -163,7 +190,8 @@ async def _company_candidates(symbol: str, now: datetime) -> list[dict[str, Any]
     return out
 
 
-async def _write(user: User, selected: list[dict[str, Any]]) -> str:
+async def _write(user: User, selected: list[dict[str, Any]], now: datetime | None = None) -> str:
+    now = (now or utcnow()).astimezone(timezone.utc)
     facts = json.dumps(selected, ensure_ascii=False, default=str)
     recent_facts, recent_turns = await asyncio.gather(
         facts_repo.current(user.id, limit=8),
@@ -177,25 +205,124 @@ async def _write(user: User, selected: list[dict[str, Any]]) -> str:
     }
     draft = await provider.generate(
         system=(
-            "Write a Telegram morning brief for a finance professional. Use only the supplied facts. "
-            "Rank the most important first. Write 3-5 short lines, no greeting, header, table, or advice. "
-            "Each line must name its source and as-of date/time. Connect items to the user context only "
-            "when supported."
+            "Write the content for a compact mobile morning brief for a finance professional. Use only "
+            "the supplied candidates and user context. Return each candidate once, ranked by importance. "
+            "For each item, copy its key exactly, write a specific 2-4 word label, and one plain-sentence "
+            "insight of at most 24 words that explains what changed and why it matters. Do not include "
+            "rank numbers, bullets, greetings, headings, sources, timestamps, markdown, advice, or facts "
+            "not present in the input."
         ),
         prompt=f"User context: {json.dumps(context, ensure_ascii=False)}\nCandidates: {facts}",
         temperature=0.25,
+        json_schema=BRIEF_SCHEMA,
     )
-    if not draft.strip():
-        return ""
-    polished = await provider.generate(
-        system=(
-            "Edit this finance brief. Preserve every factual claim and citation. Return at most five "
-            "short lines, biggest first, no greeting, heading, table, disclaimer, or sign-off."
-        ),
-        prompt=draft,
-        temperature=0.1,
-    )
-    return (polished or draft).strip()
+    items = _draft_items(draft, selected)
+    return _render_brief(user, selected, items, now)
+
+
+def _draft_items(draft: str, selected: list[dict[str, Any]]) -> list[dict[str, str]]:
+    """Accept model wording only for known candidates; fill gaps with verified source text."""
+    by_key = {str(candidate.get("key") or ""): candidate for candidate in selected}
+    parsed: list[dict[str, str]] = []
+    try:
+        payload = json.loads(draft)
+        rows = payload.get("items", []) if isinstance(payload, dict) else []
+    except (json.JSONDecodeError, TypeError):
+        rows = []
+
+    used: set[str] = set()
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        key = str(row.get("key") or "")
+        if key not in by_key or key in used:
+            continue
+        label = _single_line(row.get("label"), limit=42)
+        insight = _single_line(row.get("insight"), limit=170)
+        if not label or not insight:
+            continue
+        parsed.append({"key": key, "label": label, "insight": insight})
+        used.add(key)
+
+    for candidate in selected:
+        key = str(candidate.get("key") or "")
+        if key in used:
+            continue
+        parsed.append(
+            {
+                "key": key,
+                "label": _fallback_label(candidate),
+                "insight": _single_line(candidate.get("text"), limit=170),
+            }
+        )
+    return parsed[:3]
+
+
+def _render_brief(
+    user: User,
+    selected: list[dict[str, Any]],
+    items: list[dict[str, str]],
+    now: datetime,
+) -> str:
+    """Own the visual hierarchy in code so model output can never become a text wall."""
+    zone = _zone(user.timezone)
+    local_now = now.astimezone(zone)
+    lines = [f"☀️ **Morning brief · {local_now:%a}, {local_now.day} {local_now:%b}**"]
+    by_key = {str(candidate.get("key") or ""): candidate for candidate in selected}
+    for rank, item in enumerate(items, start=1):
+        candidate = by_key.get(item["key"], {})
+        label = item["label"] or _fallback_label(candidate)
+        insight = item["insight"] or _single_line(candidate.get("text"), limit=170)
+        source = _source_label(candidate.get("source"))
+        as_of = _as_of_label(candidate.get("as_of"), zone)
+        lines.extend(
+            [
+                f"**{rank} · {label}**",
+                f"{insight} — {source} · {as_of}",
+            ]
+        )
+    return "\n".join(lines)
+
+
+def _single_line(value: Any, limit: int) -> str:
+    text = re.sub(r"\s+", " ", str(value or "")).strip().strip("*_#- ")
+    if len(text) <= limit:
+        return text
+    clipped = text[: limit - 1].rsplit(" ", 1)[0].rstrip(".,;:—- ")
+    return f"{clipped}…"
+
+
+def _fallback_label(candidate: dict[str, Any]) -> str:
+    key = str(candidate.get("key") or "")
+    symbol = str(candidate.get("text") or "").split(":", 1)[0].strip()
+    kind = key.split(":", 1)[0].capitalize() if ":" in key else "Market"
+    return f"{symbol} {kind}" if symbol and len(symbol.split()) == 1 else kind
+
+
+def _source_label(value: Any) -> str:
+    source = _single_line(value or "Source unavailable", limit=36)
+    return re.sub(r"(?<=[a-z])(?=[A-Z])", " ", source)
+
+
+def _as_of_label(value: Any, zone: ZoneInfo) -> str:
+    if isinstance(value, datetime):
+        parsed = value
+        has_time = True
+    else:
+        raw = str(value or "").strip()
+        has_time = "T" in raw
+        try:
+            parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        except ValueError:
+            return "time unavailable"
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    local = parsed.astimezone(zone)
+    date_label = f"{local.day} {local:%b}"
+    if not has_time:
+        return date_label
+    hour = local.strftime("%I").lstrip("0") or "0"
+    return f"{date_label}, {hour}:{local:%M %p}"
 
 
 def _zone(name: str) -> ZoneInfo:

@@ -10,6 +10,7 @@ from urllib.parse import parse_qs, quote, urlencode, urlparse
 
 from atlas.config import settings
 from atlas.db.integrations import REQUESTED_SCOPES
+from atlas.services.google_links import gmail_thread_url
 from atlas.services.util import http
 
 AUTH_URL = "https://accounts.google.com/o/oauth2/v2/auth"
@@ -186,8 +187,10 @@ async def _gmail_message(token: str, message_id: str) -> dict[str, Any]:
     if "error" in data:
         return data
     headers = {h.get("name", "").lower(): h.get("value", "") for h in data.get("payload", {}).get("headers", [])}
-    return {"id": message_id, "thread_id": data.get("threadId"), "subject": headers.get("subject", ""),
-            "from": headers.get("from", ""), "date": headers.get("date", ""), "snippet": data.get("snippet", "")}
+    thread_id = data.get("threadId")
+    return {"id": message_id, "thread_id": thread_id, "web_url": gmail_thread_url(thread_id),
+            "subject": headers.get("subject", ""), "from": headers.get("from", ""),
+            "date": headers.get("date", ""), "snippet": data.get("snippet", "")}
 
 
 async def calendar_events(token: str, start: str, end: str) -> Any:
@@ -197,8 +200,10 @@ async def calendar_events(token: str, start: str, end: str) -> Any:
     )
     if "error" in data:
         return data
-    return [{"summary": e.get("summary", ""), "start": e.get("start", {}), "end": e.get("end", {}),
-             "attendees": [a.get("email", "") for a in e.get("attendees", [])], "location": e.get("location", "")}
+    return [{"id": e.get("id", ""), "summary": e.get("summary", ""),
+             "start": e.get("start", {}), "end": e.get("end", {}),
+             "attendees": [a.get("email", "") for a in e.get("attendees", [])],
+             "location": e.get("location", ""), "web_url": e.get("htmlLink", "")}
             for e in data.get("items", [])]
 
 
@@ -224,7 +229,12 @@ async def drive_search(
             "fields": "files(id,name,mimeType,modifiedTime,webViewLink,description,parents)",
         },
     )
-    return data.get("files", []) if "error" not in data else data
+    if "error" in data:
+        return data
+    return [
+        {**item, "web_url": item.get("webViewLink", "")}
+        for item in data.get("files", [])
+    ]
 
 
 async def _get_json(url: str, token: str, what: str, params: Any = None) -> dict[str, Any]:
