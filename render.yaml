@@ -1,0 +1,41 @@
+services:
+  - type: web
+    name: atlas-epm-fintech
+    runtime: python
+    plan: free
+    region: singapore
+    buildCommand: pip install .
+    startCommand: python -m atlas
+    healthCheckPath: /health
+    autoDeployTrigger: commit
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.12.12
+      - key: TELEGRAM_BOT_TOKEN
+        sync: false
+      - key: ALLOWED_TELEGRAM_USERS
+        sync: false
+      - key: ALLOWED_CHAT_IDS
+        sync: false
+      - key: TESTER_PASSCODE
+        sync: false
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: GEMINI_FALLBACK_MODEL
+        value: gemini-3.1-flash-lite
+      - key: TRANSCRIPTION_API_KEY
+        sync: false
+      - key: FALLBACK_LLM_API_KEY
+        sync: false
+      - key: MONGODB_URI
+        sync: false
+      - key: TOKEN_ENCRYPTION_KEY
+        sync: false
+      - key: SEC_USER_AGENT
+        sync: false
+      - key: FINNHUB_API_KEY
+        sync: false
+      - key: GOOGLE_CLIENT_ID
+        sync: false
+      - key: GOOGLE_CLIENT_SECRET
+        sync: false
